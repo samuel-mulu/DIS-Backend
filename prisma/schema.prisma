@@ -1,0 +1,152 @@
+// This is your Prisma schema file
+// Learn more: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// Enums
+enum RoleName {
+  SYSTEM_ADMIN
+  MEDICATION_MANAGER
+  VIEWER
+}
+
+enum MedicationStatus {
+  AVAILABLE
+  OUT_OF_STOCK
+  UNAVAILABLE
+}
+
+enum AuditAction {
+  CREATE
+  UPDATE
+  STATUS_CHANGE
+  LOGIN
+  LOGOUT
+  CREATE_USER
+  UPDATE_USER
+  ACTIVATE_USER
+  DEACTIVATE_USER
+}
+
+enum EntityType {
+  USER
+  ROLE
+  MEDICATION
+  STATUS_HISTORY
+  AUDIT_LOG
+  LOCATION
+}
+
+// Models
+model Role {
+  id          String     @id @default(cuid())
+  name        RoleName   @unique
+  description String?
+  users       User[]
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+
+  @@index([name])
+}
+
+model User {
+  id                  String          @id @default(cuid())
+  fullName            String
+  email               String          @unique
+  passwordHash        String
+  roleId              String
+  role                Role            @relation(fields: [roleId], references: [id])
+  departmentId        String?
+  department          Location?       @relation(fields: [departmentId], references: [id])
+  isActive            Boolean         @default(true)
+  createdMedications  Medication[]    @relation("MedicationCreator")
+  updatedMedications  Medication[]    @relation("MedicationUpdater")
+  changedStatuses     StatusHistory[]
+  auditLogs           AuditLog[]
+  createdAt           DateTime        @default(now())
+  updatedAt           DateTime        @updatedAt
+
+  @@index([email])
+  @@index([roleId])
+  @@index([departmentId])
+}
+
+model Location {
+  id           String       @id @default(cuid())
+  name         String       @unique
+  description  String?
+  users        User[]
+  medications  Medication[]
+  createdAt    DateTime     @default(now())
+  updatedAt    DateTime     @updatedAt
+
+  @@index([name])
+}
+
+model Medication {
+  id            String         @id @default(cuid())
+  code          String         @unique
+  genericName   String
+  brandName     String
+  strength      String
+  dosageForm    String
+  category      String
+  manufacturer  String
+  description   String?
+  status        MedicationStatus @default(AVAILABLE)
+  locationId    String
+  location      Location       @relation(fields: [locationId], references: [id])
+  createdById   String
+  createdBy     User           @relation("MedicationCreator", fields: [createdById], references: [id])
+  updatedById   String
+  updatedBy     User           @relation("MedicationUpdater", fields: [updatedById], references: [id])
+  statusHistory StatusHistory[]
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+
+  @@index([code])
+  @@index([status])
+  @@index([locationId])
+  @@index([createdById])
+  @@index([updatedById])
+}
+
+model StatusHistory {
+  id           String          @id @default(cuid())
+  medicationId String
+  medication   Medication      @relation(fields: [medicationId], references: [id])
+  oldStatus    MedicationStatus
+  newStatus    MedicationStatus
+  reason       String?
+  changedById  String
+  changedBy    User            @relation(fields: [changedById], references: [id])
+  changedAt    DateTime        @default(now())
+
+  @@index([medicationId])
+  @@index([changedById])
+  @@index([changedAt])
+}
+
+model AuditLog {
+  id         String       @id @default(cuid())
+  userId     String
+  user       User         @relation(fields: [userId], references: [id])
+  action     AuditAction
+  entityType EntityType
+  entityId   String
+  oldValue   String?
+  newValue   String?
+  createdAt  DateTime     @default(now())
+
+  @@index([userId])
+  @@index([entityType])
+  @@index([entityId])
+  @@index([createdAt])
+}
