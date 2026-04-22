@@ -4,8 +4,29 @@ import bcrypt from 'bcryptjs';
 import { CreateUserInput, UpdateUserInput } from './users.validation';
 import { createAuditLog } from '../../utils/audit';
 import { NotFoundError, ValidationError } from '../../middleware/error.middleware';
+import { invalidateAuthUserSnapshot } from '../../utils/auth-user-cache';
 
-const userWithRoleSelect = {
+const userListSelect = {
+  id: true,
+  fullName: true,
+  email: true,
+  isActive: true,
+  departmentId: true,
+  createdAt: true,
+  role: {
+    select: {
+      name: true,
+    },
+  },
+  department: {
+    select: {
+      id: true,
+      name: true,
+    },
+  },
+} as const;
+
+const userDetailSelect = {
   id: true,
   fullName: true,
   email: true,
@@ -65,7 +86,7 @@ export async function getUsers(filters: GetUsersFilters = {}) {
   const [data, total] = await Promise.all([
     prisma.user.findMany({
       where,
-      select: userWithRoleSelect,
+      select: userListSelect,
       orderBy: { createdAt: 'desc' },
       skip: (page - 1) * limit,
       take: limit,
@@ -73,8 +94,50 @@ export async function getUsers(filters: GetUsersFilters = {}) {
     prisma.user.count({ where }),
   ]);
 
+  const missingDepartmentIds = Array.from(
+    new Set(
+      data
+        .filter((user) => user.departmentId && !user.department)
+        .map((user) => user.departmentId as string)
+    )
+  );
+
+  let locationNameById = new Map<string, string>();
+  if (missingDepartmentIds.length > 0) {
+    const locations = await prisma.location.findMany({
+      where: {
+        id: { in: missingDepartmentIds },
+      },
+      select: {
+        id: true,
+        name: true,
+      },
+    });
+
+    locationNameById = new Map(locations.map((location) => [location.id, location.name]));
+  }
+
+  const normalizedData = data.map((user) => {
+    if (user.department || !user.departmentId) {
+      return user;
+    }
+
+    const fallbackDepartmentName = locationNameById.get(user.departmentId);
+    if (!fallbackDepartmentName) {
+      return user;
+    }
+
+    return {
+      ...user,
+      department: {
+        id: user.departmentId,
+        name: fallbackDepartmentName,
+      },
+    };
+  });
+
   return {
-    data,
+    data: normalizedData,
     meta: {
       page,
       limit,
@@ -86,7 +149,7 @@ export async function getUsers(filters: GetUsersFilters = {}) {
 export async function getUserById(id: string) {
   const user = await prisma.user.findUnique({
     where: { id },
-    select: userWithRoleSelect,
+    select: userDetailSelect,
   });
 
   if (!user) {
@@ -122,31 +185,36 @@ export async function createUser(input: CreateUserInput, userId: string) {
   // Hash password
   const passwordHash = await bcrypt.hash(password, 10);
 
-  const user = await prisma.user.create({
-    data: {
-      fullName,
-      email,
-      passwordHash,
-      roleId,
-      departmentId: role.name === RoleName.MEDICATION_MANAGER ? departmentId : null,
-      isActive: true,
-    },
-    select: userWithRoleSelect,
+  const user = await prisma.$transaction(async (tx) => {
+    const createdUser = await tx.user.create({
+      data: {
+        fullName,
+        email,
+        passwordHash,
+        roleId,
+        departmentId: role.name === RoleName.MEDICATION_MANAGER ? departmentId : null,
+        isActive: true,
+      },
+      select: userDetailSelect,
+    });
+
+    await createAuditLog({
+      userId,
+      action: AuditAction.CREATE_USER,
+      entityType: EntityType.USER,
+      entityId: createdUser.id,
+      newValue: {
+        fullName: createdUser.fullName,
+        email: createdUser.email,
+        roleName: createdUser.role.name,
+        departmentId: createdUser.departmentId,
+      },
+    }, tx);
+
+    return createdUser;
   });
 
-  // Create audit log
-  await createAuditLog({
-    userId,
-    action: AuditAction.CREATE_USER,
-    entityType: EntityType.USER,
-    entityId: user.id,
-    newValue: {
-      fullName: user.fullName,
-      email: user.email,
-      roleName: role.name,
-      departmentId: user.departmentId,
-    },
-  });
+  invalidateAuthUserSnapshot(user.id);
 
   return user;
 }
@@ -214,31 +282,36 @@ export async function updateUser(id: string, input: UpdateUserInput, userId: str
     departmentId: existingUser.departmentId,
   };
 
-  const user = await prisma.user.update({
-    where: { id },
-    data: {
-      ...(fullName && { fullName }),
-      ...(email && { email }),
-      ...(roleId && { roleId: nextRoleId }),
-      departmentId: nextRoleName === RoleName.MEDICATION_MANAGER ? nextDepartmentId : null,
-    },
-    select: userWithRoleSelect,
+  const user = await prisma.$transaction(async (tx) => {
+    const updatedUser = await tx.user.update({
+      where: { id },
+      data: {
+        ...(fullName && { fullName }),
+        ...(email && { email }),
+        ...(roleId && { roleId: nextRoleId }),
+        departmentId: nextRoleName === RoleName.MEDICATION_MANAGER ? nextDepartmentId : null,
+      },
+      select: userDetailSelect,
+    });
+
+    await createAuditLog({
+      userId,
+      action: AuditAction.UPDATE_USER,
+      entityType: EntityType.USER,
+      entityId: updatedUser.id,
+      oldValue,
+      newValue: {
+        fullName: updatedUser.fullName,
+        email: updatedUser.email,
+        roleId: updatedUser.roleId,
+        departmentId: updatedUser.departmentId,
+      },
+    }, tx);
+
+    return updatedUser;
   });
 
-  // Create audit log
-  await createAuditLog({
-    userId,
-    action: AuditAction.UPDATE_USER,
-    entityType: EntityType.USER,
-    entityId: user.id,
-    oldValue,
-    newValue: {
-      fullName: user.fullName,
-      email: user.email,
-      roleId: user.roleId,
-      departmentId: user.departmentId,
-    },
-  });
+  invalidateAuthUserSnapshot(user.id);
 
   return user;
 }
@@ -252,21 +325,26 @@ export async function activateUser(id: string, userId: string) {
     throw new NotFoundError('User not found');
   }
 
-  const updatedUser = await prisma.user.update({
-    where: { id },
-    data: { isActive: true },
-    select: userWithRoleSelect,
+  const updatedUser = await prisma.$transaction(async (tx) => {
+    const activatedUser = await tx.user.update({
+      where: { id },
+      data: { isActive: true },
+      select: userDetailSelect,
+    });
+
+    await createAuditLog({
+      userId,
+      action: AuditAction.ACTIVATE_USER,
+      entityType: EntityType.USER,
+      entityId: user.id,
+      oldValue: { isActive: false },
+      newValue: { isActive: true },
+    }, tx);
+
+    return activatedUser;
   });
 
-  // Create audit log
-  await createAuditLog({
-    userId,
-    action: AuditAction.ACTIVATE_USER,
-    entityType: EntityType.USER,
-    entityId: user.id,
-    oldValue: { isActive: false },
-    newValue: { isActive: true },
-  });
+  invalidateAuthUserSnapshot(updatedUser.id);
 
   return updatedUser;
 }
@@ -285,21 +363,26 @@ export async function deactivateUser(id: string, userId: string) {
     throw new ValidationError('You cannot deactivate yourself');
   }
 
-  const updatedUser = await prisma.user.update({
-    where: { id },
-    data: { isActive: false },
-    select: userWithRoleSelect,
+  const updatedUser = await prisma.$transaction(async (tx) => {
+    const deactivatedUser = await tx.user.update({
+      where: { id },
+      data: { isActive: false },
+      select: userDetailSelect,
+    });
+
+    await createAuditLog({
+      userId,
+      action: AuditAction.DEACTIVATE_USER,
+      entityType: EntityType.USER,
+      entityId: user.id,
+      oldValue: { isActive: true },
+      newValue: { isActive: false },
+    }, tx);
+
+    return deactivatedUser;
   });
 
-  // Create audit log
-  await createAuditLog({
-    userId,
-    action: AuditAction.DEACTIVATE_USER,
-    entityType: EntityType.USER,
-    entityId: user.id,
-    oldValue: { isActive: true },
-    newValue: { isActive: false },
-  });
+  invalidateAuthUserSnapshot(updatedUser.id);
 
   return updatedUser;
 }

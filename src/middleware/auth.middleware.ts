@@ -1,15 +1,15 @@
 import { Request, Response, NextFunction } from 'express';
 import { Prisma } from '@prisma/client';
-import { verifyToken, JWTPayload } from '../utils/jwt';
-import { prisma } from '../config/db';
+import { verifyToken } from '../utils/jwt';
 import { config } from '../config/env';
 import { UnauthorizedError } from './error.middleware';
+import { AuthenticatedUser, getAuthUserSnapshot } from '../utils/auth-user-cache';
 
 export interface AuthRequest extends Request {
-  user?: JWTPayload;
+  user?: AuthenticatedUser;
 }
 
-export function requireUser(req: AuthRequest): JWTPayload {
+export function requireUser(req: AuthRequest): AuthenticatedUser {
   if (!req.user) {
     throw new UnauthorizedError('Unauthorized');
   }
@@ -42,7 +42,7 @@ export async function authenticate(req: AuthRequest, res: Response, next: NextFu
     return res.status(401).json({ message: 'No token provided' });
   }
 
-  let decoded: JWTPayload;
+  let decoded;
   try {
     decoded = verifyToken(token);
   } catch {
@@ -50,19 +50,7 @@ export async function authenticate(req: AuthRequest, res: Response, next: NextFu
   }
 
   try {
-    // Verify user still exists and is active with minimal selected fields.
-    const user = await prisma.user.findUnique({
-      where: { id: decoded.userId },
-      select: {
-        isActive: true,
-        departmentId: true,
-        role: {
-          select: {
-            name: true,
-          },
-        },
-      },
-    });
+    const user = await getAuthUserSnapshot(decoded.userId);
 
     if (!user) {
       return res.status(401).json({ message: 'User not found' });
@@ -72,13 +60,7 @@ export async function authenticate(req: AuthRequest, res: Response, next: NextFu
       return res.status(401).json({ message: 'User account is inactive' });
     }
 
-    req.user = {
-      userId: decoded.userId,
-      email: decoded.email,
-      role: user.role.name,
-      departmentId: user.departmentId || undefined,
-    };
-    
+    req.user = user;
     next();
   } catch (error) {
     if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2024') {

@@ -1,14 +1,9 @@
-import { RoleName } from '@prisma/client';
+import { AuthenticatedUser } from '../utils/auth-user-cache';
 
 declare global {
   namespace Express {
     interface Request {
-      user?: {
-        userId: string;
-        email: string;
-        role: RoleName;
-        departmentId?: string;
-      };
+      user?: AuthenticatedUser;
     }
   }
 }

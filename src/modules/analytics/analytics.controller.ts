@@ -1,5 +1,6 @@
 import { Response } from 'express';
 import {
+  getDashboardOverview,
   getDashboardSummary,
   getRecentStatusChanges,
   getOutOfStockInsights,
@@ -18,6 +19,17 @@ export const getDashboardSummaryController = asyncHandler(async (
   res.json({ data: summary });
 });
 
+export const getDashboardOverviewController = asyncHandler(async (
+  req: AuthRequest,
+  res: Response
+) => {
+  const user = requireUser(req);
+  const { limit } = parsePagination(req.query);
+  const locationId = sanitizeQueryValue(req.query.locationId);
+  const overview = await getDashboardOverview(user, locationId, limit, limit);
+  res.json({ data: overview });
+});
+
 export const getRecentStatusChangesController = asyncHandler(async (
   req: AuthRequest,
   res: Response
@@ -34,7 +46,8 @@ export const getOutOfStockInsightsController = asyncHandler(async (
   res: Response
 ) => {
   const user = requireUser(req);
+  const { limit } = parsePagination(req.query);
   const locationId = sanitizeQueryValue(req.query.locationId);
-  const insights = await getOutOfStockInsights(user, locationId);
+  const insights = await getOutOfStockInsights(user, locationId, limit);
   res.json({ data: insights });
 });

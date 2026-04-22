@@ -12,8 +12,8 @@ export interface RecentStatusChange {
   id: string;
   medication: {
     id: string;
-    code: string;
-    genericName: string;
+    strength: string;
+    dosageForm: string;
   };
   oldStatus: MedicationStatus;
   newStatus: MedicationStatus;
@@ -27,8 +27,8 @@ export interface RecentStatusChange {
 
 export interface OutOfStockInsightItem {
   id: string;
-  code: string;
-  genericName: string;
+  strength: string;
+  dosageForm: string;
   location: {
     id: string;
     name: string;
@@ -37,8 +37,8 @@ export interface OutOfStockInsightItem {
 
 export interface MostFrequentlyOutOfStock {
   medicationId: string;
-  code: string;
-  genericName: string;
+  strength: string;
+  dosageForm: string;
   outOfStockChangeCount: number;
 }
 
@@ -54,10 +54,19 @@ export interface OutOfStockInsights {
   statusBreakdown: StatusBreakdown;
 }
 
+export interface DashboardOverview {
+  summary: DashboardSummary;
+  recentStatusChanges: RecentStatusChange[];
+  outOfStockInsights: OutOfStockInsights;
+}
+
 export interface AnalyticsActor {
   role: RoleName;
   departmentId?: string;
 }
+
+const DEFAULT_RECENT_CHANGES_LIMIT = 10;
+const DEFAULT_OUT_OF_STOCK_LIMIT = 10;
 
 function buildMedicationScope(actor: AnalyticsActor, locationId?: string) {
   if (actor.role === RoleName.MEDICATION_MANAGER) {
@@ -69,105 +78,69 @@ function buildMedicationScope(actor: AnalyticsActor, locationId?: string) {
   return {};
 }
 
-export async function getDashboardSummary(actor: AnalyticsActor, locationId?: string): Promise<DashboardSummary> {
-  const medicationScope = buildMedicationScope(actor, locationId);
-  const [total, available, outOfStock, unavailable] = await Promise.all([
-    prisma.medication.count({ where: medicationScope }),
-    prisma.medication.count({ where: { ...medicationScope, status: MedicationStatus.AVAILABLE } }),
-    prisma.medication.count({ where: { ...medicationScope, status: MedicationStatus.OUT_OF_STOCK } }),
-    prisma.medication.count({ where: { ...medicationScope, status: MedicationStatus.UNAVAILABLE } }),
-  ]);
-
-  return {
-    totalMedications: total,
-    availableCount: available,
-    outOfStockCount: outOfStock,
-    unavailableCount: unavailable,
-  };
-}
-
-export async function getRecentStatusChanges(
-  actor: AnalyticsActor,
-  limit: number = 10,
-  locationId?: string
-): Promise<RecentStatusChange[]> {
-  const medicationScope = buildMedicationScope(actor, locationId);
-  const statusChanges = await prisma.statusHistory.findMany({
-    take: limit,
-    orderBy: { changedAt: 'desc' },
-    where: {
-      medication: medicationScope,
-    },
-    include: {
-      medication: {
-        select: {
-          id: true,
-          code: true,
-          genericName: true,
-        },
-      },
-      changedBy: {
-        select: {
-          id: true,
-          fullName: true,
-        },
-      },
-    },
-  });
-
-  return statusChanges.map((change) => ({
-    id: change.id,
-    medication: {
-      id: change.medication.id,
-      code: change.medication.code,
-      genericName: change.medication.genericName,
-    },
-    oldStatus: change.oldStatus,
-    newStatus: change.newStatus,
-    reason: change.reason,
-    changedBy: {
-      id: change.changedBy.id,
-      fullName: change.changedBy.fullName,
-    },
-    changedAt: change.changedAt,
-  }));
-}
-
-export async function getOutOfStockInsights(actor: AnalyticsActor, locationId?: string): Promise<OutOfStockInsights> {
-  const medicationScope = buildMedicationScope(actor, locationId);
-  const [currentlyOutOfStock, statusBreakdown] = await Promise.all([
-    prisma.medication.findMany({
-      where: { ...medicationScope, status: MedicationStatus.OUT_OF_STOCK },
-      select: {
-        id: true,
-        code: true,
-        genericName: true,
-        location: {
-          select: {
-            id: true,
-            name: true,
-          },
-        },
-      },
-    }),
-    prisma.medication.groupBy({
-      by: ['status'],
-      where: medicationScope,
-      _count: true,
-    }),
-  ]);
-
+function buildStatusBreakdown(
+  groupedStatuses: Array<{
+    status: MedicationStatus;
+    _count: number;
+  }>
+): StatusBreakdown {
   const breakdown: StatusBreakdown = {
     AVAILABLE: 0,
     OUT_OF_STOCK: 0,
     UNAVAILABLE: 0,
   };
 
-  statusBreakdown.forEach((item) => {
+  groupedStatuses.forEach((item) => {
     breakdown[item.status as keyof StatusBreakdown] = item._count;
   });
 
-  // Get most frequently out-of-stock medications
+  return breakdown;
+}
+
+function buildDashboardSummaryFromBreakdown(statusBreakdown: StatusBreakdown): DashboardSummary {
+  const totalMedications =
+    statusBreakdown.AVAILABLE + statusBreakdown.OUT_OF_STOCK + statusBreakdown.UNAVAILABLE;
+
+  return {
+    totalMedications,
+    availableCount: statusBreakdown.AVAILABLE,
+    outOfStockCount: statusBreakdown.OUT_OF_STOCK,
+    unavailableCount: statusBreakdown.UNAVAILABLE,
+  };
+}
+
+async function getCurrentlyOutOfStockItems(
+  medicationScope: ReturnType<typeof buildMedicationScope>,
+  limit: number
+): Promise<OutOfStockInsightItem[]> {
+  const medications = await prisma.medication.findMany({
+    where: { ...medicationScope, status: MedicationStatus.OUT_OF_STOCK },
+    select: {
+      id: true,
+      strength: true,
+      dosageForm: true,
+      location: {
+        select: {
+          id: true,
+          name: true,
+        },
+      },
+    },
+    orderBy: { updatedAt: 'desc' },
+    take: limit,
+  });
+
+  return medications.map((medication) => ({
+    id: medication.id,
+    strength: medication.strength,
+    dosageForm: medication.dosageForm,
+    location: medication.location,
+  }));
+}
+
+async function getMostFrequentlyOutOfStockItems(
+  medicationScope: ReturnType<typeof buildMedicationScope>
+): Promise<MostFrequentlyOutOfStock[]> {
   const outOfStockChanges = await prisma.statusHistory.groupBy({
     by: ['medicationId'],
     where: {
@@ -185,40 +158,150 @@ export async function getOutOfStockInsights(actor: AnalyticsActor, locationId?: 
     take: 10,
   });
 
+  if (outOfStockChanges.length === 0) {
+    return [];
+  }
+
   const medicationIds = outOfStockChanges.map((item) => item.medicationId);
   const medications = await prisma.medication.findMany({
     where: { id: { in: medicationIds } },
     select: {
       id: true,
-      code: true,
-      genericName: true,
+      strength: true,
+      dosageForm: true,
     },
   });
 
-  const medicationMap = new Map(medications.map((m) => [m.id, m]));
+  const medicationMap = new Map(medications.map((medication) => [medication.id, medication]));
 
-  const mostFrequentlyOutOfStock: MostFrequentlyOutOfStock[] = outOfStockChanges
+  return outOfStockChanges
     .map((item) => {
       const medication = medicationMap.get(item.medicationId);
-      if (!medication) return null;
+      if (!medication) {
+        return null;
+      }
+
       return {
         medicationId: item.medicationId,
-        code: medication.code,
-        genericName: medication.genericName,
+        strength: medication.strength,
+        dosageForm: medication.dosageForm,
         outOfStockChangeCount: item._count.medicationId,
       };
     })
     .filter((item): item is MostFrequentlyOutOfStock => item !== null)
     .slice(0, 10);
+}
+
+async function getStatusBreakdown(actor: AnalyticsActor, locationId?: string): Promise<StatusBreakdown> {
+  const medicationScope = buildMedicationScope(actor, locationId);
+  const groupedStatuses = await prisma.medication.groupBy({
+    by: ['status'],
+    where: medicationScope,
+    _count: {
+      status: true,
+    },
+  });
+
+  return buildStatusBreakdown(
+    groupedStatuses.map((item) => ({
+      status: item.status,
+      _count: item._count.status,
+    }))
+  );
+}
+
+export async function getDashboardSummary(actor: AnalyticsActor, locationId?: string): Promise<DashboardSummary> {
+  const statusBreakdown = await getStatusBreakdown(actor, locationId);
+  return buildDashboardSummaryFromBreakdown(statusBreakdown);
+}
+
+export async function getRecentStatusChanges(
+  actor: AnalyticsActor,
+  limit: number = DEFAULT_RECENT_CHANGES_LIMIT,
+  locationId?: string
+): Promise<RecentStatusChange[]> {
+  const medicationScope = buildMedicationScope(actor, locationId);
+  const statusChanges = await prisma.statusHistory.findMany({
+    take: limit,
+    orderBy: { changedAt: 'desc' },
+    where: {
+      medication: medicationScope,
+    },
+    include: {
+      medication: {
+        select: {
+          id: true,
+          strength: true,
+          dosageForm: true,
+        },
+      },
+      changedBy: {
+        select: {
+          id: true,
+          fullName: true,
+        },
+      },
+    },
+  });
+
+  return statusChanges.map((change) => ({
+    id: change.id,
+    medication: {
+      id: change.medication.id,
+      strength: change.medication.strength,
+      dosageForm: change.medication.dosageForm,
+    },
+    oldStatus: change.oldStatus,
+    newStatus: change.newStatus,
+    reason: change.reason,
+    changedBy: {
+      id: change.changedBy.id,
+      fullName: change.changedBy.fullName,
+    },
+    changedAt: change.changedAt,
+  }));
+}
+
+export async function getOutOfStockInsights(
+  actor: AnalyticsActor,
+  locationId?: string,
+  currentlyOutOfStockLimit: number = DEFAULT_OUT_OF_STOCK_LIMIT
+): Promise<OutOfStockInsights> {
+  const medicationScope = buildMedicationScope(actor, locationId);
+  const [currentlyOutOfStock, statusBreakdown, mostFrequentlyOutOfStock] = await Promise.all([
+    getCurrentlyOutOfStockItems(medicationScope, currentlyOutOfStockLimit),
+    getStatusBreakdown(actor, locationId),
+    getMostFrequentlyOutOfStockItems(medicationScope),
+  ]);
 
   return {
-    currentlyOutOfStock: currentlyOutOfStock.map((med) => ({
-      id: med.id,
-      code: med.code,
-      genericName: med.genericName,
-      location: med.location,
-    })),
+    currentlyOutOfStock,
     mostFrequentlyOutOfStock,
-    statusBreakdown: breakdown,
+    statusBreakdown,
+  };
+}
+
+export async function getDashboardOverview(
+  actor: AnalyticsActor,
+  locationId?: string,
+  recentStatusChangeLimit: number = DEFAULT_RECENT_CHANGES_LIMIT,
+  currentlyOutOfStockLimit: number = DEFAULT_OUT_OF_STOCK_LIMIT
+): Promise<DashboardOverview> {
+  const medicationScope = buildMedicationScope(actor, locationId);
+  const [statusBreakdown, recentStatusChanges, currentlyOutOfStock, mostFrequentlyOutOfStock] = await Promise.all([
+    getStatusBreakdown(actor, locationId),
+    getRecentStatusChanges(actor, recentStatusChangeLimit, locationId),
+    getCurrentlyOutOfStockItems(medicationScope, currentlyOutOfStockLimit),
+    getMostFrequentlyOutOfStockItems(medicationScope),
+  ]);
+
+  return {
+    summary: buildDashboardSummaryFromBreakdown(statusBreakdown),
+    recentStatusChanges,
+    outOfStockInsights: {
+      currentlyOutOfStock,
+      mostFrequentlyOutOfStock,
+      statusBreakdown,
+    },
   };
 }

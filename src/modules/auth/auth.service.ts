@@ -3,7 +3,9 @@ import { RoleName } from '@prisma/client';
 import { comparePassword } from '../../utils/hash';
 import { generateToken, JWTPayload } from '../../utils/jwt';
 import { AuditAction, EntityType } from '@prisma/client';
-import { NotFoundError, UnauthorizedError } from '../../middleware/error.middleware';
+import { UnauthorizedError } from '../../middleware/error.middleware';
+import { AuthenticatedUser, warmAuthUserSnapshot } from '../../utils/auth-user-cache';
+import { createAuditLog } from '../../utils/audit';
 
 export interface LoginInput {
   email: string;
@@ -12,11 +14,47 @@ export interface LoginInput {
 
 export interface LoginResult {
   token: string;
-  user: {
-    id: string;
-    fullName: string;
-    email: string;
-    role: RoleName;
+  user: CurrentUserResponse;
+}
+
+export interface CurrentUserResponse {
+  id: string;
+  fullName: string;
+  email: string;
+  role: RoleName;
+  isActive: boolean;
+  departmentId: string | null;
+  departmentName: string | null;
+}
+
+const loginUserSelect = {
+  id: true,
+  fullName: true,
+  email: true,
+  passwordHash: true,
+  isActive: true,
+  departmentId: true,
+  role: {
+    select: {
+      name: true,
+    },
+  },
+  department: {
+    select: {
+      name: true,
+    },
+  },
+} as const;
+
+export function formatCurrentUser(user: AuthenticatedUser): CurrentUserResponse {
+  return {
+    id: user.userId,
+    fullName: user.fullName,
+    email: user.email,
+    role: user.role,
+    isActive: user.isActive,
+    departmentId: user.departmentId || null,
+    departmentName: user.departmentName || null,
   };
 }
 
@@ -25,15 +63,7 @@ export async function login(input: LoginInput): Promise<LoginResult> {
 
   const user = await prisma.user.findUnique({
     where: { email },
-    select: {
-      id: true,
-      fullName: true,
-      email: true,
-      passwordHash: true,
-      isActive: true,
-      roleId: true,
-      departmentId: true,
-    },
+    select: loginUserSelect,
   });
 
   if (!user) {
@@ -49,79 +79,36 @@ export async function login(input: LoginInput): Promise<LoginResult> {
     throw new UnauthorizedError('Invalid credentials');
   }
 
-  const role = await prisma.role.findUnique({
-    where: { id: user.roleId },
-    select: { name: true },
-  });
-
-  if (!role) {
-    throw new UnauthorizedError('Invalid credentials');
-  }
-
-  const payload: JWTPayload = {
+  const authenticatedUser: AuthenticatedUser = {
     userId: user.id,
-    email: user.email,
-    role: role.name,
-    departmentId: user.departmentId || undefined,
-  };
-
-  const token = generateToken(payload);
-
-  // Create audit log for login
-  await prisma.auditLog.create({
-    data: {
-      userId: user.id,
-      action: AuditAction.LOGIN,
-      entityType: EntityType.USER,
-      entityId: user.id,
-    },
-  });
-
-  return {
-    token,
-    user: {
-      id: user.id,
-      fullName: user.fullName,
-      email: user.email,
-      role: role.name,
-    },
-  };
-}
-
-export async function getCurrentUser(userId: string) {
-  const user = await prisma.user.findUnique({
-    where: { id: userId },
-    select: {
-      id: true,
-      fullName: true,
-      email: true,
-      isActive: true,
-      departmentId: true,
-      role: {
-        select: {
-          name: true,
-        },
-      },
-      department: {
-        select: {
-          id: true,
-          name: true,
-        },
-      },
-    },
-  });
-
-  if (!user) {
-    throw new NotFoundError('User not found');
-  }
-
-  return {
-    id: user.id,
     fullName: user.fullName,
     email: user.email,
     role: user.role.name,
     isActive: user.isActive,
-    departmentId: user.departmentId,
+    departmentId: user.departmentId || undefined,
     departmentName: user.department?.name || null,
+  };
+
+  const payload: JWTPayload = {
+    userId: authenticatedUser.userId,
+    email: authenticatedUser.email,
+    role: authenticatedUser.role,
+    departmentId: authenticatedUser.departmentId,
+  };
+
+  const token = generateToken(payload);
+
+  await createAuditLog({
+    userId: authenticatedUser.userId,
+    action: AuditAction.LOGIN,
+    entityType: EntityType.USER,
+    entityId: authenticatedUser.userId,
+  });
+
+  warmAuthUserSnapshot(authenticatedUser);
+
+  return {
+    token,
+    user: formatCurrentUser(authenticatedUser),
   };
 }

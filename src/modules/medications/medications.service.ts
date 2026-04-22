@@ -10,37 +10,50 @@ import { ForbiddenError, NotFoundError, ValidationError } from '../../middleware
 
 const medicationListSelect = {
   id: true,
-  code: true,
   genericName: true,
-  brandName: true,
   strength: true,
   dosageForm: true,
-  category: true,
-  manufacturer: true,
-  description: true,
+  status: true,
+  updatedAt: true,
+  location: {
+    select: {
+      id: true,
+      name: true,
+    },
+  },
+} as const;
+
+const medicationDetailSelect = {
+  id: true,
+  genericName: true,
+  strength: true,
+  dosageForm: true,
   status: true,
   locationId: true,
-  createdById: true,
-  updatedById: true,
   createdAt: true,
   updatedAt: true,
   location: {
     select: {
       id: true,
       name: true,
-      description: true,
     },
   },
   createdBy: {
-    select: { id: true, fullName: true, email: true },
+    select: { id: true, fullName: true },
   },
   updatedBy: {
-    select: { id: true, fullName: true, email: true },
+    select: { id: true, fullName: true },
   },
 } as const;
 
-const medicationDetailSelect = {
-  ...medicationListSelect,
+const medicationAuditSelect = {
+  id: true,
+  genericName: true,
+  strength: true,
+  dosageForm: true,
+  status: true,
+  locationId: true,
+  updatedAt: true,
 } as const;
 
 export interface MedicationFilters {
@@ -84,6 +97,26 @@ function ensureDepartmentAccess(actor: MedicationActor, medicationLocationId: st
   }
 }
 
+function buildMedicationAuditSnapshot(medication: {
+  id: string;
+  genericName: string;
+  strength: string;
+  dosageForm: string;
+  status: MedicationStatus;
+  locationId: string;
+  updatedAt: Date;
+}) {
+  return {
+    id: medication.id,
+    genericName: medication.genericName,
+    strength: medication.strength,
+    dosageForm: medication.dosageForm,
+    status: medication.status,
+    locationId: medication.locationId,
+    updatedAt: medication.updatedAt,
+  };
+}
+
 export async function getMedications(filters: MedicationFilters = {}, actor: MedicationActor) {
   const { search, status, locationId, page = 1, limit = 10 } = filters;
 
@@ -91,9 +124,9 @@ export async function getMedications(filters: MedicationFilters = {}, actor: Med
 
   if (search) {
     where.OR = [
-      { code: { contains: search, mode: 'insensitive' } },
       { genericName: { contains: search, mode: 'insensitive' } },
-      { brandName: { contains: search, mode: 'insensitive' } },
+      { strength: { contains: search, mode: 'insensitive' } },
+      { dosageForm: { contains: search, mode: 'insensitive' } },
     ];
   }
 
@@ -145,7 +178,7 @@ export async function createMedication(
   input: CreateMedicationInput,
   actor: MedicationActor
 ) {
-  const { code, ...rest } = input;
+  const { ...rest } = input;
   const userId = actor.userId;
 
   if (actor.role === RoleName.MEDICATION_MANAGER) {
@@ -155,31 +188,26 @@ export async function createMedication(
     }
   }
 
-  const existingMedication = await prisma.medication.findUnique({
-    where: { code },
-  });
+  const medication = await prisma.$transaction(async (tx) => {
+    const createdMedication = await tx.medication.create({
+      data: {
+        ...rest,
+        status: input.status || MedicationStatus.AVAILABLE,
+        createdById: userId,
+        updatedById: userId,
+      },
+      select: medicationDetailSelect,
+    });
 
-  if (existingMedication) {
-    throw new ValidationError('Medication with this code already exists');
-  }
+    await createAuditLog({
+      userId,
+      action: AuditAction.CREATE,
+      entityType: EntityType.MEDICATION,
+      entityId: createdMedication.id,
+      newValue: buildMedicationAuditSnapshot(createdMedication),
+    }, tx);
 
-  const medication = await prisma.medication.create({
-    data: {
-      ...rest,
-      code,
-      status: input.status || MedicationStatus.AVAILABLE,
-      createdById: userId,
-      updatedById: userId,
-    },
-    select: medicationListSelect,
-  });
-
-  await createAuditLog({
-    userId,
-    action: AuditAction.CREATE,
-    entityType: EntityType.MEDICATION,
-    entityId: medication.id,
-    newValue: medication,
+    return createdMedication;
   });
 
   return medication;
@@ -193,10 +221,7 @@ export async function updateMedication(
   const userId = actor.userId;
   const medication = await prisma.medication.findUnique({
     where: { id },
-    select: {
-      id: true,
-      locationId: true,
-    },
+    select: medicationAuditSelect,
   });
 
   if (!medication) {
@@ -209,22 +234,26 @@ export async function updateMedication(
     throw new ForbiddenError('You cannot move medication to another department');
   }
 
-  const updatedMedication = await prisma.medication.update({
-    where: { id },
-    data: {
-      ...input,
-      updatedById: userId,
-    },
-    select: medicationListSelect,
-  });
+  const updatedMedication = await prisma.$transaction(async (tx) => {
+    const medicationAfterUpdate = await tx.medication.update({
+      where: { id },
+      data: {
+        ...input,
+        updatedById: userId,
+      },
+      select: medicationDetailSelect,
+    });
 
-  await createAuditLog({
-    userId,
-    action: AuditAction.UPDATE,
-    entityType: EntityType.MEDICATION,
-    entityId: medication.id,
-    oldValue: medication,
-    newValue: updatedMedication,
+    await createAuditLog({
+      userId,
+      action: AuditAction.UPDATE,
+      entityType: EntityType.MEDICATION,
+      entityId: medication.id,
+      oldValue: buildMedicationAuditSnapshot(medication),
+      newValue: buildMedicationAuditSnapshot(medicationAfterUpdate),
+    }, tx);
+
+    return medicationAfterUpdate;
   });
 
   return updatedMedication;
@@ -238,11 +267,7 @@ export async function changeMedicationStatus(
   const userId = actor.userId;
   const medication = await prisma.medication.findUnique({
     where: { id },
-    select: {
-      id: true,
-      status: true,
-      locationId: true,
-    },
+    select: medicationAuditSelect,
   });
 
   if (!medication) {
@@ -258,32 +283,36 @@ export async function changeMedicationStatus(
     throw new ValidationError('New status must be different from current status');
   }
 
-  const updatedMedication = await prisma.medication.update({
-    where: { id },
-    data: {
-      status: newStatus,
-      updatedById: userId,
-    },
-    select: medicationListSelect,
-  });
+  const updatedMedication = await prisma.$transaction(async (tx) => {
+    const medicationAfterStatusChange = await tx.medication.update({
+      where: { id },
+      data: {
+        status: newStatus,
+        updatedById: userId,
+      },
+      select: medicationDetailSelect,
+    });
 
-  await prisma.statusHistory.create({
-    data: {
-      medicationId: id,
-      oldStatus,
-      newStatus,
-      reason,
-      changedById: userId,
-    },
-  });
+    await tx.statusHistory.create({
+      data: {
+        medicationId: id,
+        oldStatus,
+        newStatus,
+        reason,
+        changedById: userId,
+      },
+    });
 
-  await createAuditLog({
-    userId,
-    action: AuditAction.STATUS_CHANGE,
-    entityType: EntityType.MEDICATION,
-    entityId: medication.id,
-    oldValue: { status: oldStatus },
-    newValue: { status: newStatus, reason },
+    await createAuditLog({
+      userId,
+      action: AuditAction.STATUS_CHANGE,
+      entityType: EntityType.MEDICATION,
+      entityId: medication.id,
+      oldValue: { status: oldStatus },
+      newValue: { status: newStatus, reason },
+    }, tx);
+
+    return medicationAfterStatusChange;
   });
 
   return updatedMedication;
@@ -307,7 +336,7 @@ export async function getMedicationStatusHistory(medicationId: string, actor: Me
     where: { medicationId },
     include: {
       changedBy: {
-        select: { id: true, fullName: true, email: true },
+        select: { id: true, fullName: true },
       },
     },
     orderBy: { changedAt: 'desc' },

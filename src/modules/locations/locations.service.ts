@@ -15,11 +15,21 @@ export async function getLocations(actor: LocationActor) {
 
     return prisma.location.findMany({
       where: { id: actor.departmentId },
+      select: {
+        id: true,
+        name: true,
+        description: true,
+      },
       orderBy: { name: 'asc' },
     });
   }
 
   return prisma.location.findMany({
+    select: {
+      id: true,
+      name: true,
+      description: true,
+    },
     orderBy: { name: 'asc' },
   });
 }

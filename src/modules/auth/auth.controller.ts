@@ -1,5 +1,5 @@
 import { Request, Response, NextFunction } from 'express';
-import { login, getCurrentUser } from './auth.service';
+import { formatCurrentUser, login } from './auth.service';
 import { AuthRequest, requireUser } from '../../middleware/auth.middleware';
 import { loginSchema } from './auth.validation';
 import { config } from '../../config/env';
@@ -34,6 +34,5 @@ export async function logoutController(req: Request, res: Response) {
 
 export const getCurrentUserController = asyncHandler(async (req: AuthRequest, res: Response) => {
   const user = requireUser(req);
-  const currentUser = await getCurrentUser(user.userId);
-  res.json(currentUser);
+  res.json(formatCurrentUser(user));
 });

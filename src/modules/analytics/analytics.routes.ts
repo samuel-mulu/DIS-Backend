@@ -3,6 +3,7 @@ import { authenticate } from '../../middleware/auth.middleware';
 import { authorize } from '../../middleware/role.middleware';
 import { RoleName } from '@prisma/client';
 import {
+  getDashboardOverviewController,
   getDashboardSummaryController,
   getRecentStatusChangesController,
   getOutOfStockInsightsController,
@@ -19,6 +20,12 @@ const dashboardRoles = [
   RoleName.MEDICATION_MANAGER,
   RoleName.VIEWER,
 ];
+
+router.get(
+  '/dashboard-overview',
+  authorize(...dashboardRoles),
+  getDashboardOverviewController
+);
 
 router.get(
   '/dashboard-summary',

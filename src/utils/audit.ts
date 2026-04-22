@@ -1,5 +1,5 @@
+import { AuditAction, EntityType, Prisma } from '@prisma/client';
 import { prisma } from '../config/db';
-import { AuditAction, EntityType } from '@prisma/client';
 
 export interface AuditLogOptions {
   userId: string;
@@ -10,14 +10,16 @@ export interface AuditLogOptions {
   newValue?: any;
 }
 
+type AuditLogClient = Pick<typeof prisma, 'auditLog'> | Pick<Prisma.TransactionClient, 'auditLog'>;
+
 /**
  * Creates an audit log entry in the database.
  * standardizes the format of old and new values as JSON strings.
  */
-export async function createAuditLog(options: AuditLogOptions) {
+export async function createAuditLog(options: AuditLogOptions, db: AuditLogClient = prisma) {
   const { userId, action, entityType, entityId, oldValue, newValue } = options;
 
-  return prisma.auditLog.create({
+  return db.auditLog.create({
     data: {
       userId,
       action,
