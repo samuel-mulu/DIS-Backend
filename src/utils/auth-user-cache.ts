@@ -3,6 +3,11 @@ import { prisma } from '../config/db';
 
 const AUTH_USER_CACHE_TTL_MS = 30_000;
 
+interface AuthDepartmentSummary {
+  id: string;
+  name: string;
+}
+
 export interface AuthenticatedUser {
   userId: string;
   fullName: string;
@@ -11,6 +16,8 @@ export interface AuthenticatedUser {
   isActive: boolean;
   departmentId?: string;
   departmentName?: string | null;
+  departmentIds: string[];
+  departments: AuthDepartmentSummary[];
 }
 
 interface CacheEntry {
@@ -34,10 +41,31 @@ const authUserSelect = {
   },
   department: {
     select: {
+      id: true,
       name: true,
     },
   },
+  viewerDepartmentAccesses: {
+    select: {
+      location: {
+        select: {
+          id: true,
+          name: true,
+        },
+      },
+    },
+  },
 } as const;
+
+function dedupeDepartments(departments: AuthDepartmentSummary[]) {
+  const departmentMap = new Map<string, AuthDepartmentSummary>();
+
+  departments.forEach((department) => {
+    departmentMap.set(department.id, department);
+  });
+
+  return Array.from(departmentMap.values());
+}
 
 function buildAuthenticatedUser(user: {
   id: string;
@@ -49,9 +77,21 @@ function buildAuthenticatedUser(user: {
     name: RoleName;
   };
   department: {
+    id: string;
     name: string;
   } | null;
+  viewerDepartmentAccesses: Array<{
+    location: {
+      id: string;
+      name: string;
+    };
+  }>;
 }): AuthenticatedUser {
+  const departments = dedupeDepartments([
+    ...(user.department ? [{ id: user.department.id, name: user.department.name }] : []),
+    ...user.viewerDepartmentAccesses.map((assignment) => assignment.location),
+  ]);
+
   return {
     userId: user.id,
     fullName: user.fullName,
@@ -60,6 +100,8 @@ function buildAuthenticatedUser(user: {
     isActive: user.isActive,
     departmentId: user.departmentId || undefined,
     departmentName: user.department?.name || null,
+    departmentIds: departments.map((department) => department.id),
+    departments,
   };
 }
 

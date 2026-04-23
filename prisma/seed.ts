@@ -164,6 +164,25 @@ async function main() {
         create: user,
       });
     }
+
+    const viewerUser = await prisma.user.findUnique({
+      where: { email: 'sarah.viewer@example.com' },
+      select: { id: true },
+    });
+
+    if (viewerUser) {
+      await prisma.viewerDepartmentAccess.deleteMany({
+        where: { userId: viewerUser.id },
+      });
+
+      await prisma.viewerDepartmentAccess.createMany({
+        data: [storePharmacy.id, inPatientPharmacy.id].map((locationId) => ({
+          userId: viewerUser.id,
+          locationId,
+        })),
+      });
+    }
+
     console.log('Sample users seeded successfully');
   }
 

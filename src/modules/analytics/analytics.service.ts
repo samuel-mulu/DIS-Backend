@@ -1,5 +1,6 @@
 import { MedicationStatus, RoleName } from '@prisma/client';
 import { prisma } from '../../config/db';
+import { buildDepartmentScope } from '../../utils/department-access';
 
 export interface DashboardSummary {
   totalMedications: number;
@@ -63,19 +64,14 @@ export interface DashboardOverview {
 export interface AnalyticsActor {
   role: RoleName;
   departmentId?: string;
+  departmentIds?: string[];
 }
 
 const DEFAULT_RECENT_CHANGES_LIMIT = 10;
 const DEFAULT_OUT_OF_STOCK_LIMIT = 10;
 
 function buildMedicationScope(actor: AnalyticsActor, locationId?: string) {
-  if (actor.role === RoleName.MEDICATION_MANAGER) {
-    return { locationId: actor.departmentId };
-  }
-  if (locationId) {
-    return { locationId };
-  }
-  return {};
+  return buildDepartmentScope(actor, locationId);
 }
 
 function buildStatusBreakdown(

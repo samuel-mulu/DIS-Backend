@@ -6,6 +6,11 @@ import { createAuditLog } from '../../utils/audit';
 import { NotFoundError, ValidationError } from '../../middleware/error.middleware';
 import { invalidateAuthUserSnapshot } from '../../utils/auth-user-cache';
 
+const departmentSummarySelect = {
+  id: true,
+  name: true,
+} as const;
+
 const userListSelect = {
   id: true,
   fullName: true,
@@ -19,9 +24,13 @@ const userListSelect = {
     },
   },
   department: {
+    select: departmentSummarySelect,
+  },
+  viewerDepartmentAccesses: {
     select: {
-      id: true,
-      name: true,
+      location: {
+        select: departmentSummarySelect,
+      },
     },
   },
 } as const;
@@ -42,16 +51,132 @@ const userDetailSelect = {
     },
   },
   department: {
+    select: departmentSummarySelect,
+  },
+  viewerDepartmentAccesses: {
     select: {
-      id: true,
-      name: true,
+      location: {
+        select: departmentSummarySelect,
+      },
     },
   },
 } as const;
 
-function validateDepartmentAssignment(roleName: RoleName, departmentId?: string | null) {
+interface DepartmentSummary {
+  id: string;
+  name: string;
+}
+
+type UserWithDepartmentAssignments = {
+  departmentId: string | null;
+  department: DepartmentSummary | null;
+  viewerDepartmentAccesses: Array<{
+    location: DepartmentSummary;
+  }>;
+};
+
+function normalizeDepartmentIds(departmentIds?: Array<string | null | undefined> | null) {
+  return Array.from(
+    new Set(
+      (departmentIds || [])
+        .map((departmentId) => departmentId?.trim())
+        .filter((departmentId): departmentId is string => !!departmentId)
+    )
+  );
+}
+
+function dedupeDepartments(departments: DepartmentSummary[]) {
+  const departmentMap = new Map<string, DepartmentSummary>();
+
+  departments.forEach((department) => {
+    departmentMap.set(department.id, department);
+  });
+
+  return Array.from(departmentMap.values());
+}
+
+function normalizeUserRecord<T extends UserWithDepartmentAssignments>(
+  user: T,
+  fallbackDepartmentName?: string
+) {
+  const directDepartment =
+    user.department ||
+    (user.departmentId && fallbackDepartmentName
+      ? {
+          id: user.departmentId,
+          name: fallbackDepartmentName,
+        }
+      : null);
+
+  const departments = dedupeDepartments([
+    ...(directDepartment ? [directDepartment] : []),
+    ...user.viewerDepartmentAccesses.map((assignment) => assignment.location),
+  ]);
+
+  return {
+    ...user,
+    department: directDepartment,
+    departments,
+    departmentIds: departments.map((department) => department.id),
+  };
+}
+
+async function loadDepartmentNameById(departmentIds: string[]) {
+  if (departmentIds.length === 0) {
+    return new Map<string, string>();
+  }
+
+  const locations = await prisma.location.findMany({
+    where: {
+      id: { in: departmentIds },
+    },
+    select: departmentSummarySelect,
+  });
+
+  return new Map(locations.map((location) => [location.id, location.name]));
+}
+
+async function assertDepartmentsExist(departmentIds: string[]) {
+  if (departmentIds.length === 0) {
+    return;
+  }
+
+  const uniqueDepartmentIds = normalizeDepartmentIds(departmentIds);
+  const existingDepartments = await prisma.location.findMany({
+    where: {
+      id: { in: uniqueDepartmentIds },
+    },
+    select: {
+      id: true,
+    },
+  });
+
+  if (existingDepartments.length !== uniqueDepartmentIds.length) {
+    throw new ValidationError('One or more selected departments are invalid');
+  }
+}
+
+function validateDepartmentAssignment(
+  roleName: RoleName,
+  departmentId?: string | null,
+  departmentIds: string[] = []
+) {
   if (roleName === RoleName.MEDICATION_MANAGER && !departmentId) {
     throw new ValidationError('Medication manager must be assigned to a department');
+  }
+
+  if (roleName === RoleName.VIEWER) {
+    if (departmentIds.length === 0) {
+      throw new ValidationError('Viewer must be assigned to at least one department');
+    }
+
+    if (departmentIds.length > 2) {
+      throw new ValidationError('Viewer can only be assigned up to 2 departments');
+    }
+  }
+
+  if (roleName !== RoleName.VIEWER && departmentIds.length > 0) {
+    throw new ValidationError('Only viewer users can be assigned multiple departments');
   }
 }
 
@@ -94,47 +219,16 @@ export async function getUsers(filters: GetUsersFilters = {}) {
     prisma.user.count({ where }),
   ]);
 
-  const missingDepartmentIds = Array.from(
-    new Set(
-      data
-        .filter((user) => user.departmentId && !user.department)
-        .map((user) => user.departmentId as string)
-    )
+  const missingDepartmentIds = normalizeDepartmentIds(
+    data
+      .filter((user) => user.departmentId && !user.department)
+      .map((user) => user.departmentId)
   );
+  const locationNameById = await loadDepartmentNameById(missingDepartmentIds);
 
-  let locationNameById = new Map<string, string>();
-  if (missingDepartmentIds.length > 0) {
-    const locations = await prisma.location.findMany({
-      where: {
-        id: { in: missingDepartmentIds },
-      },
-      select: {
-        id: true,
-        name: true,
-      },
-    });
-
-    locationNameById = new Map(locations.map((location) => [location.id, location.name]));
-  }
-
-  const normalizedData = data.map((user) => {
-    if (user.department || !user.departmentId) {
-      return user;
-    }
-
-    const fallbackDepartmentName = locationNameById.get(user.departmentId);
-    if (!fallbackDepartmentName) {
-      return user;
-    }
-
-    return {
-      ...user,
-      department: {
-        id: user.departmentId,
-        name: fallbackDepartmentName,
-      },
-    };
-  });
+  const normalizedData = data.map((user) =>
+    normalizeUserRecord(user, user.departmentId ? locationNameById.get(user.departmentId) : undefined)
+  );
 
   return {
     data: normalizedData,
@@ -156,13 +250,19 @@ export async function getUserById(id: string) {
     throw new NotFoundError('User not found');
   }
 
-  return user;
+  let fallbackDepartmentName: string | undefined;
+  if (user.departmentId && !user.department) {
+    const locationNameById = await loadDepartmentNameById([user.departmentId]);
+    fallbackDepartmentName = locationNameById.get(user.departmentId);
+  }
+
+  return normalizeUserRecord(user, fallbackDepartmentName);
 }
 
 export async function createUser(input: CreateUserInput, userId: string) {
   const { fullName, email, password, roleId, departmentId } = input;
+  const viewerDepartmentIds = normalizeDepartmentIds(input.departmentIds);
 
-  // Check for duplicate email
   const existingUser = await prisma.user.findUnique({
     where: { email },
   });
@@ -171,7 +271,6 @@ export async function createUser(input: CreateUserInput, userId: string) {
     throw new ValidationError('Email already exists');
   }
 
-  // Verify role exists
   const role = await prisma.role.findUnique({
     where: { id: roleId },
   });
@@ -180,9 +279,12 @@ export async function createUser(input: CreateUserInput, userId: string) {
     throw new ValidationError('Invalid role');
   }
 
-  validateDepartmentAssignment(role.name, departmentId);
+  validateDepartmentAssignment(role.name, departmentId, viewerDepartmentIds);
+  await assertDepartmentsExist([
+    ...(role.name === RoleName.MEDICATION_MANAGER && departmentId ? [departmentId] : []),
+    ...(role.name === RoleName.VIEWER ? viewerDepartmentIds : []),
+  ]);
 
-  // Hash password
   const passwordHash = await bcrypt.hash(password, 10);
 
   const user = await prisma.$transaction(async (tx) => {
@@ -195,23 +297,46 @@ export async function createUser(input: CreateUserInput, userId: string) {
         departmentId: role.name === RoleName.MEDICATION_MANAGER ? departmentId : null,
         isActive: true,
       },
+      select: {
+        id: true,
+      },
+    });
+
+    if (role.name === RoleName.VIEWER && viewerDepartmentIds.length > 0) {
+      await tx.viewerDepartmentAccess.createMany({
+        data: viewerDepartmentIds.map((locationId) => ({
+          userId: createdUser.id,
+          locationId,
+        })),
+      });
+    }
+
+    const createdUserDetails = await tx.user.findUnique({
+      where: { id: createdUser.id },
       select: userDetailSelect,
     });
+
+    if (!createdUserDetails) {
+      throw new NotFoundError('User not found after creation');
+    }
+
+    const normalizedCreatedUser = normalizeUserRecord(createdUserDetails);
 
     await createAuditLog({
       userId,
       action: AuditAction.CREATE_USER,
       entityType: EntityType.USER,
-      entityId: createdUser.id,
+      entityId: normalizedCreatedUser.id,
       newValue: {
-        fullName: createdUser.fullName,
-        email: createdUser.email,
-        roleName: createdUser.role.name,
-        departmentId: createdUser.departmentId,
+        fullName: normalizedCreatedUser.fullName,
+        email: normalizedCreatedUser.email,
+        roleName: normalizedCreatedUser.role.name,
+        departmentId: normalizedCreatedUser.departmentId,
+        departmentIds: normalizedCreatedUser.departmentIds,
       },
     }, tx);
 
-    return createdUser;
+    return normalizedCreatedUser;
   });
 
   invalidateAuthUserSnapshot(user.id);
@@ -233,6 +358,11 @@ export async function updateUser(id: string, input: UpdateUserInput, userId: str
           name: true,
         },
       },
+      viewerDepartmentAccesses: {
+        select: {
+          locationId: true,
+        },
+      },
     },
   });
 
@@ -242,7 +372,6 @@ export async function updateUser(id: string, input: UpdateUserInput, userId: str
 
   const { fullName, email, roleId, departmentId } = input;
 
-  // Check for duplicate email if email is being changed
   if (email && email !== existingUser.email) {
     const duplicateUser = await prisma.user.findUnique({
       where: { email },
@@ -253,7 +382,6 @@ export async function updateUser(id: string, input: UpdateUserInput, userId: str
     }
   }
 
-  // Verify role exists if roleId is being changed
   let nextRoleId = existingUser.roleId;
   let nextRoleName = existingUser.role.name;
   if (roleId) {
@@ -268,22 +396,36 @@ export async function updateUser(id: string, input: UpdateUserInput, userId: str
     if (!roleRecord) {
       throw new ValidationError('Invalid role');
     }
+
     nextRoleId = roleRecord.id;
     nextRoleName = roleRecord.name;
   }
 
+  const existingViewerDepartmentIds = existingUser.viewerDepartmentAccesses.map(
+    (assignment) => assignment.locationId
+  );
   const nextDepartmentId = departmentId !== undefined ? departmentId : existingUser.departmentId;
-  validateDepartmentAssignment(nextRoleName, nextDepartmentId);
+  const nextViewerDepartmentIds =
+    input.departmentIds !== undefined
+      ? normalizeDepartmentIds(input.departmentIds)
+      : existingViewerDepartmentIds;
+
+  validateDepartmentAssignment(nextRoleName, nextDepartmentId, nextViewerDepartmentIds);
+  await assertDepartmentsExist([
+    ...(nextRoleName === RoleName.MEDICATION_MANAGER && nextDepartmentId ? [nextDepartmentId] : []),
+    ...(nextRoleName === RoleName.VIEWER ? nextViewerDepartmentIds : []),
+  ]);
 
   const oldValue = {
     fullName: existingUser.fullName,
     email: existingUser.email,
     roleId: existingUser.roleId,
     departmentId: existingUser.departmentId,
+    departmentIds: existingViewerDepartmentIds,
   };
 
   const user = await prisma.$transaction(async (tx) => {
-    const updatedUser = await tx.user.update({
+    await tx.user.update({
       where: { id },
       data: {
         ...(fullName && { fullName }),
@@ -291,24 +433,48 @@ export async function updateUser(id: string, input: UpdateUserInput, userId: str
         ...(roleId && { roleId: nextRoleId }),
         departmentId: nextRoleName === RoleName.MEDICATION_MANAGER ? nextDepartmentId : null,
       },
+    });
+
+    await tx.viewerDepartmentAccess.deleteMany({
+      where: { userId: id },
+    });
+
+    if (nextRoleName === RoleName.VIEWER && nextViewerDepartmentIds.length > 0) {
+      await tx.viewerDepartmentAccess.createMany({
+        data: nextViewerDepartmentIds.map((locationId) => ({
+          userId: id,
+          locationId,
+        })),
+      });
+    }
+
+    const updatedUser = await tx.user.findUnique({
+      where: { id },
       select: userDetailSelect,
     });
+
+    if (!updatedUser) {
+      throw new NotFoundError('User not found after update');
+    }
+
+    const normalizedUpdatedUser = normalizeUserRecord(updatedUser);
 
     await createAuditLog({
       userId,
       action: AuditAction.UPDATE_USER,
       entityType: EntityType.USER,
-      entityId: updatedUser.id,
+      entityId: normalizedUpdatedUser.id,
       oldValue,
       newValue: {
-        fullName: updatedUser.fullName,
-        email: updatedUser.email,
-        roleId: updatedUser.roleId,
-        departmentId: updatedUser.departmentId,
+        fullName: normalizedUpdatedUser.fullName,
+        email: normalizedUpdatedUser.email,
+        roleId: normalizedUpdatedUser.roleId,
+        departmentId: normalizedUpdatedUser.departmentId,
+        departmentIds: normalizedUpdatedUser.departmentIds,
       },
     }, tx);
 
-    return updatedUser;
+    return normalizedUpdatedUser;
   });
 
   invalidateAuthUserSnapshot(user.id);
@@ -341,7 +507,7 @@ export async function activateUser(id: string, userId: string) {
       newValue: { isActive: true },
     }, tx);
 
-    return activatedUser;
+    return normalizeUserRecord(activatedUser);
   });
 
   invalidateAuthUserSnapshot(updatedUser.id);
@@ -358,7 +524,6 @@ export async function deactivateUser(id: string, userId: string) {
     throw new NotFoundError('User not found');
   }
 
-  // Prevent admin from deactivating themselves
   if (id === userId) {
     throw new ValidationError('You cannot deactivate yourself');
   }
@@ -379,7 +544,7 @@ export async function deactivateUser(id: string, userId: string) {
       newValue: { isActive: false },
     }, tx);
 
-    return deactivatedUser;
+    return normalizeUserRecord(deactivatedUser);
   });
 
   invalidateAuthUserSnapshot(updatedUser.id);

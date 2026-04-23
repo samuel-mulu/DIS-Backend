@@ -1,20 +1,22 @@
 import { RoleName } from '@prisma/client';
 import { prisma } from '../../config/db';
-import { ForbiddenError } from '../../middleware/error.middleware';
+import { getAccessibleDepartmentIds } from '../../utils/department-access';
 
 interface LocationActor {
   role: RoleName;
   departmentId?: string;
+  departmentIds?: string[];
 }
 
 export async function getLocations(actor: LocationActor) {
-  if (actor.role === RoleName.MEDICATION_MANAGER) {
-    if (!actor.departmentId) {
-      throw new ForbiddenError('Medication manager is not assigned to a department');
-    }
-
+  if (actor.role !== RoleName.SYSTEM_ADMIN) {
+    const departmentIds = getAccessibleDepartmentIds(actor);
     return prisma.location.findMany({
-      where: { id: actor.departmentId },
+      where: {
+        id: {
+          in: departmentIds,
+        },
+      },
       select: {
         id: true,
         name: true,

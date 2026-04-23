@@ -25,6 +25,11 @@ export interface CurrentUserResponse {
   isActive: boolean;
   departmentId: string | null;
   departmentName: string | null;
+  departmentIds: string[];
+  departments: Array<{
+    id: string;
+    name: string;
+  }>;
 }
 
 const loginUserSelect = {
@@ -41,7 +46,18 @@ const loginUserSelect = {
   },
   department: {
     select: {
+      id: true,
       name: true,
+    },
+  },
+  viewerDepartmentAccesses: {
+    select: {
+      location: {
+        select: {
+          id: true,
+          name: true,
+        },
+      },
     },
   },
 } as const;
@@ -55,6 +71,8 @@ export function formatCurrentUser(user: AuthenticatedUser): CurrentUserResponse 
     isActive: user.isActive,
     departmentId: user.departmentId || null,
     departmentName: user.departmentName || null,
+    departmentIds: user.departmentIds,
+    departments: user.departments,
   };
 }
 
@@ -87,6 +105,20 @@ export async function login(input: LoginInput): Promise<LoginResult> {
     isActive: user.isActive,
     departmentId: user.departmentId || undefined,
     departmentName: user.department?.name || null,
+    departmentIds: Array.from(
+      new Set([
+        ...(user.departmentId ? [user.departmentId] : []),
+        ...user.viewerDepartmentAccesses.map((assignment) => assignment.location.id),
+      ])
+    ),
+    departments: Array.from(
+      new Map(
+        [
+          ...(user.department ? [{ id: user.department.id, name: user.department.name }] : []),
+          ...user.viewerDepartmentAccesses.map((assignment) => assignment.location),
+        ].map((department) => [department.id, department])
+      ).values()
+    ),
   };
 
   const payload: JWTPayload = {

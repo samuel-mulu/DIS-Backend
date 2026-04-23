@@ -65,6 +65,7 @@ model User {
   role                Role            @relation(fields: [roleId], references: [id])
   departmentId        String?
   department          Location?       @relation(fields: [departmentId], references: [id])
+  viewerDepartmentAccesses ViewerDepartmentAccess[]
   isActive            Boolean         @default(true)
   createdMedications  Medication[]    @relation("MedicationCreator")
   updatedMedications  Medication[]    @relation("MedicationUpdater")
@@ -86,10 +87,24 @@ model Location {
   description  String?
   users        User[]
   medications  Medication[]
+  viewerDepartmentAccesses ViewerDepartmentAccess[]
   createdAt    DateTime     @default(now())
   updatedAt    DateTime     @updatedAt
 
   @@index([name])
+}
+
+model ViewerDepartmentAccess {
+  id         String   @id @default(cuid())
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  locationId String
+  location   Location @relation(fields: [locationId], references: [id], onDelete: Cascade)
+  createdAt  DateTime @default(now())
+
+  @@unique([userId, locationId])
+  @@index([userId])
+  @@index([locationId])
 }
 
 model Medication {

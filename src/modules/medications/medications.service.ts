@@ -7,6 +7,7 @@ import {
 } from './medications.validation';
 import { createAuditLog } from '../../utils/audit';
 import { ForbiddenError, NotFoundError, ValidationError } from '../../middleware/error.middleware';
+import { buildDepartmentScope, ensureDepartmentAccess } from '../../utils/department-access';
 
 const medicationListSelect = {
   id: true,
@@ -68,6 +69,7 @@ export interface MedicationActor {
   userId: string;
   role: RoleName;
   departmentId?: string;
+  departmentIds?: string[];
 }
 
 export interface PaginatedResult<T> {
@@ -77,24 +79,6 @@ export interface PaginatedResult<T> {
     limit: number;
     total: number;
   };
-}
-
-function getManagerDepartmentId(actor: MedicationActor): string {
-  if (!actor.departmentId) {
-    throw new ForbiddenError('Medication manager is not assigned to a department');
-  }
-  return actor.departmentId;
-}
-
-function ensureDepartmentAccess(actor: MedicationActor, medicationLocationId: string) {
-  if (actor.role !== RoleName.MEDICATION_MANAGER) {
-    return;
-  }
-
-  const departmentId = getManagerDepartmentId(actor);
-  if (departmentId !== medicationLocationId) {
-    throw new ForbiddenError('You can only access medications in your department');
-  }
 }
 
 function buildMedicationAuditSnapshot(medication: {
@@ -134,11 +118,7 @@ export async function getMedications(filters: MedicationFilters = {}, actor: Med
     where.status = status;
   }
 
-  if (actor.role === RoleName.MEDICATION_MANAGER) {
-    where.locationId = getManagerDepartmentId(actor);
-  } else if (locationId) {
-    where.locationId = locationId;
-  }
+  Object.assign(where, buildDepartmentScope(actor, locationId));
 
   const skip = (page - 1) * limit;
 
@@ -182,10 +162,7 @@ export async function createMedication(
   const userId = actor.userId;
 
   if (actor.role === RoleName.MEDICATION_MANAGER) {
-    const departmentId = getManagerDepartmentId(actor);
-    if (input.locationId !== departmentId) {
-      throw new ForbiddenError('You can only create medications in your department');
-    }
+    ensureDepartmentAccess(actor, input.locationId);
   }
 
   const medication = await prisma.$transaction(async (tx) => {
